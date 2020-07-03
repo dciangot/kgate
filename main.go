@@ -210,28 +210,43 @@ func main() {
 			panic(err)
 		}
 
-		fmt.Println(isAuthorized)
+		log.Println(isAuthorized)
 
-		var parser jwtgo.Parser
-		tokenParsed, _, err := parser.ParseUnverified(tokenString, &GroupClaims{})
+		var response TokenReview
 
-		groups := []string{}
-		if claims, ok := tokenParsed.Claims.(*GroupClaims); ok {
-			groups = claims.Groups
-		} else {
-			panic(fmt.Errorf("Cannot get token information"))
-		}
+		if isAuthorized {
+			var parser jwtgo.Parser
+			tokenParsed, _, err := parser.ParseUnverified(tokenString, &GroupClaims{})
+			if err != nil {
+				panic(err)
+			}
 
-		response := TokenReview{
-			ApiVersion: "authentication.k8s.io/v1beta1",
-			Kind:       "TokenReview",
-			Status: TokenReviewStatus{
-				Authenticated: isAuthorized,
-				User: TokenReviewUser{
-					Username: "admin",
-					Groups:   groups,
+			groups := []string{}
+			if claims, ok := tokenParsed.Claims.(*GroupClaims); ok {
+				groups = claims.Groups
+			} else {
+				panic(fmt.Errorf("Cannot get token information"))
+			}
+
+			response = TokenReview{
+				ApiVersion: "authentication.k8s.io/v1beta1",
+				Kind:       "TokenReview",
+				Status: TokenReviewStatus{
+					Authenticated: isAuthorized,
+					User: TokenReviewUser{
+						Username: "admin",
+						Groups:   groups,
+					},
 				},
-			},
+			}
+		} else {
+			response = TokenReview{
+				ApiVersion: "authentication.k8s.io/v1beta1",
+				Kind:       "TokenReview",
+				Status: TokenReviewStatus{
+					Authenticated: isAuthorized,
+				},
+			}
 		}
 		responseString, err := json.Marshal(response)
 
