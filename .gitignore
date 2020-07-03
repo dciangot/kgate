@@ -1,2 +1,5 @@
 kubernetes-oidc
 test.json
+gen-cert
+cert.pem
+key.pem

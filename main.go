@@ -18,11 +18,12 @@ import (
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
 	cache "github.com/patrickmn/go-cache"
+	"github.com/spf13/viper"
 )
 
 const (
-	EnvConfigURL = "OPENID_CONFIG_URL"
-	EnvToken     = "OPENID_ACCESS_TOKEN"
+	EnvOpenIDConfigURL = "OPENID_CONFIG_URL"
+	EnvConfigOPA       = "OPA_POLICY_FILE"
 )
 
 var c *cache.Cache
@@ -165,7 +166,7 @@ type TokenReviewStatus struct {
 }
 
 type TokenReview struct {
-	ApiVersion string            `json:"apiVersion"`
+	APIVersion string            `json:"apiVersion"`
 	Kind       string            `json:"kind"`
 	Spec       TokenReviewSpec   `json:"spec,omitempty"`
 	Status     TokenReviewStatus `json:"status,omitempty"`
@@ -178,39 +179,79 @@ type GroupClaims struct {
 
 func main() {
 
+	viper.SetConfigName("kgate_config") // name of config file (without extension)
+	viper.SetConfigType("yaml")         // REQUIRED if the config file does not have the extension in the name
+	viper.AddConfigPath("/etc/kgate/")  // path to look for the config file in
+	viper.AddConfigPath("$HOME/.kgate") // call multiple times to add many search paths
+	viper.AddConfigPath(".")            // optionally look for config in the working directory
+
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			// Config file not found; ignore error if desired
+		} else {
+			// Config file was found but another error was produced
+		}
+	}
+
+	configURL := env.Get(EnvOpenIDConfigURL, "")
+	//configOPA := env.Get(EnvConfigOPA, "")
+
+	// // NOT NEEDED YET
+	// if configURL == "" && viper.IsSet("oidc.configURL") {
+	// 	configURL = viper.GetString("oidc.configURL")
+	// } else {
+	// 	panic(fmt.Errorf("unable to get OIDC config URL from config file"))
+	// }
+
+	// if configOPA == "" && viper.IsSet("opa.configPath") {
+	// 	configOPA = viper.GetString("oidc.configPath")
+	// } else {
+	// 	panic(fmt.Errorf("unable to get OPA policy file PATH from config file"))
+	// }
+
 	c = cache.New(5*time.Minute, 10*time.Minute)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+
+		// TODO: get config from file and cache it
 
 		decoder := json.NewDecoder(req.Body)
 		var review TokenReview
 
 		if err := decoder.Decode(&review); err != nil {
-			panic(err)
+			msg := fmt.Sprintf("Unable to decode auth request: %s", err)
+			http.Error(w, msg, http.StatusBadRequest)
+			return
 		}
 
 		tokenString := review.Spec.Token
 		if tokenString == "" {
-			panic(fmt.Errorf("Token is empty. Please insert a valid access token."))
+			msg := fmt.Sprintf("Token is empty. Please insert a valid access token")
+			http.Error(w, msg, http.StatusBadRequest)
+			return
 		}
-		configURL := env.Get(EnvConfigURL, "https://iam-escape.cloud.cnaf.infn.it/.well-known/openid-configuration")
 
 		isValid, err := Validate(tokenString, configURL, c)
 		if err != nil {
-			panic(err)
+			msg := fmt.Sprintf("Unable to validate token %s", err)
+			http.Error(w, msg, http.StatusBadRequest)
+			return
 		}
 
 		if !isValid {
-			panic(fmt.Errorf("Access token not valid."))
+			http.Error(w, "Invalid access token", http.StatusBadRequest)
+			return
 		}
 
 		// Authorize jwt with OPA
 		isAuthorized, err := Authorize(tokenString)
 		if err != nil {
-			panic(err)
+			msg := fmt.Sprintf("Could not process access token for  authN/Z: %s", err)
+			http.Error(w, msg, http.StatusBadRequest)
+			return
 		}
 
-		log.Println(isAuthorized)
+		log.Println(tokenString, isAuthorized)
 
 		var response TokenReview
 
@@ -218,18 +259,22 @@ func main() {
 			var parser jwtgo.Parser
 			tokenParsed, _, err := parser.ParseUnverified(tokenString, &GroupClaims{})
 			if err != nil {
-				panic(err)
+				msg := fmt.Sprintf("Unable to parse token %s", err)
+				http.Error(w, msg, http.StatusBadRequest)
+				return
 			}
 
 			groups := []string{}
 			if claims, ok := tokenParsed.Claims.(*GroupClaims); ok {
 				groups = claims.Groups
 			} else {
-				panic(fmt.Errorf("Cannot get token information"))
+				msg := fmt.Sprintf("Cannot get token information")
+				http.Error(w, msg, http.StatusBadRequest)
+				return
 			}
 
 			response = TokenReview{
-				ApiVersion: "authentication.k8s.io/v1beta1",
+				APIVersion: "authentication.k8s.io/v1beta1",
 				Kind:       "TokenReview",
 				Status: TokenReviewStatus{
 					Authenticated: isAuthorized,
@@ -241,7 +286,7 @@ func main() {
 			}
 		} else {
 			response = TokenReview{
-				ApiVersion: "authentication.k8s.io/v1beta1",
+				APIVersion: "authentication.k8s.io/v1beta1",
 				Kind:       "TokenReview",
 				Status: TokenReviewStatus{
 					Authenticated: isAuthorized,
@@ -249,14 +294,18 @@ func main() {
 			}
 		}
 		responseString, err := json.Marshal(response)
+		if err != nil {
+			msg := fmt.Sprintf("Unable to format a valid response %s", err)
+			http.Error(w, msg, http.StatusInternalServerError)
+			return
+		}
 
 		io.WriteString(w, string(responseString))
 	})
 
-	// One can use generate_cert.go in crypto/tls to generate cert.pem and key.pem.
-	log.Printf("About to listen on 8443. Go to https://127.0.0.1:8443/")
+	// One can use utils/generate_cert.go to generate cert.pem and key.pem.
+	log.Printf("About to listen on 8443. Go to https://localhost:8443/")
 	err := http.ListenAndServeTLS(":8443", "cert.pem", "key.pem", nil)
 	//err := http.ListenAndServe(":8443", nil)
 	log.Fatal(err)
-	// Return answer to k8s api server
 }
