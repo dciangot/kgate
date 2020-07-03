@@ -37,17 +37,20 @@ func Validate(accessToken string, configURL string, c *cache.Cache) (bool, error
 		"RS3256", "RS3384", "RS3512", "ES3256", "ES3384", "ES3512",
 	}
 
+	// Validate token against issuer
 	tt, _ := jwtgo.Parse(accessToken, func(token *jwtgo.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwtgo.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
 		}
 
+		// check if publicKey already in cache
 		pub, found := c.Get("key")
 		if found {
 			//fmt.Println("Using cached pubKey")
 			return pub, nil
 		}
 
+		// Retrieve Issuer metadata from discovery endpoint
 		d := openid.DiscoveryDoc{}
 
 		req, err := http.NewRequest(http.MethodGet, configURL, nil)
@@ -71,6 +74,7 @@ func Validate(accessToken string, configURL string, c *cache.Cache) (bool, error
 			return nil, err
 		}
 
+		// Get Public Key from JWK URI
 		resp, err := clnt.Get(d.JwksURI)
 		if err != nil {
 			return nil, err
@@ -94,6 +98,7 @@ func Validate(accessToken string, configURL string, c *cache.Cache) (bool, error
 			}
 		}
 
+		// Return the rsa public key for the token validation
 		pubKey := kk.(*rsa.PublicKey)
 
 		c.Set("key", pubKey, cache.DefaultExpiration)
@@ -106,7 +111,7 @@ func Validate(accessToken string, configURL string, c *cache.Cache) (bool, error
 	return tt.Valid, nil
 }
 
-// Authorize token based on policy
+// Authorize token based on OPA policy
 func Authorize(accessToken string) (bool, error) {
 	ctx := context.Background()
 
@@ -213,8 +218,6 @@ func main() {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 
-		// TODO: get config from file and cache it
-
 		decoder := json.NewDecoder(req.Body)
 		var review TokenReview
 
@@ -255,6 +258,7 @@ func main() {
 
 		var response TokenReview
 
+		// Generate response for k8s APIServer
 		if isAuthorized {
 			var parser jwtgo.Parser
 			tokenParsed, _, err := parser.ParseUnverified(tokenString, &GroupClaims{})
