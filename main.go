@@ -7,13 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"time"
 
 	jwtgo "github.com/dgrijalva/jwt-go"
 	"github.com/minio/minio/cmd/config/identity/openid"
 	"github.com/minio/minio/pkg/env"
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
+	cache "github.com/patrickmn/go-cache"
 )
 
 const (
@@ -21,8 +25,10 @@ const (
 	EnvToken     = "OPENID_ACCESS_TOKEN"
 )
 
+var c *cache.Cache
+
 // Validate token vs provider
-func Validate(accessToken string, configURL string) (bool, error) {
+func Validate(accessToken string, configURL string, c *cache.Cache) (bool, error) {
 
 	jp := new(jwtgo.Parser)
 	jp.ValidMethods = []string{
@@ -31,9 +37,14 @@ func Validate(accessToken string, configURL string) (bool, error) {
 	}
 
 	tt, _ := jwtgo.Parse(accessToken, func(token *jwtgo.Token) (interface{}, error) {
-		// Don't forget to validate the alg is what you expect:
 		if _, ok := token.Method.(*jwtgo.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+		}
+
+		pub, found := c.Get("key")
+		if found {
+			//fmt.Println("Using cached pubKey")
+			return pub, nil
 		}
 
 		d := openid.DiscoveryDoc{}
@@ -83,6 +94,8 @@ func Validate(accessToken string, configURL string) (bool, error) {
 		}
 
 		pubKey := kk.(*rsa.PublicKey)
+
+		c.Set("key", pubKey, cache.DefaultExpiration)
 
 		return pubKey, nil
 
@@ -135,31 +148,100 @@ func Authorize(accessToken string) (bool, error) {
 	return rs[0].Expressions[0].Value.(bool), nil
 }
 
+type TokenReviewSpec struct {
+	Token string `json:"token"`
+}
+
+type TokenReviewUser struct {
+	Username string   `json:"username"`
+	UID      string   `json:"uid,omitempty"`
+	Groups   []string `json:"groups,omitempty"`
+	Extra    []string `json:"extra,omitempty"`
+}
+
+type TokenReviewStatus struct {
+	Authenticated bool            `json:"authenticated"`
+	User          TokenReviewUser `json:"user,omitempty"`
+}
+
+type TokenReview struct {
+	ApiVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Spec       TokenReviewSpec   `json:"spec,omitempty"`
+	Status     TokenReviewStatus `json:"status,omitempty"`
+}
+
+type GroupClaims struct {
+	Groups []string `json:"wlcg.groups"`
+	jwtgo.StandardClaims
+}
+
 func main() {
 
-	// sample token string taken from the New example
-	tokenString := env.Get(EnvToken, "")
-	if tokenString == "" {
-		panic(fmt.Errorf("Env OPENID_ACCESS_TOKEN is empty. Please insert a valid access token there"))
-	}
-	configURL := env.Get(EnvConfigURL, "https://iam-escape.cloud.cnaf.infn.it/.well-known/openid-configuration")
+	c = cache.New(5*time.Minute, 10*time.Minute)
 
-	isValid, err := Validate(tokenString, configURL)
-	if err != nil {
-		panic(err)
-	}
+	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 
-	if !isValid {
-		panic(fmt.Errorf("Access token not valid."))
-	}
+		decoder := json.NewDecoder(req.Body)
+		var review TokenReview
 
-	// Authorize jwt with OPA
-	isAuthorized, err := Authorize(tokenString)
-	if err != nil {
-		panic(err)
-	}
+		if err := decoder.Decode(&review); err != nil {
+			panic(err)
+		}
 
-	//fmt.Println(isAuthorized)
+		tokenString := review.Spec.Token
+		if tokenString == "" {
+			panic(fmt.Errorf("Token is empty. Please insert a valid access token."))
+		}
+		configURL := env.Get(EnvConfigURL, "https://iam-escape.cloud.cnaf.infn.it/.well-known/openid-configuration")
 
+		isValid, err := Validate(tokenString, configURL, c)
+		if err != nil {
+			panic(err)
+		}
+
+		if !isValid {
+			panic(fmt.Errorf("Access token not valid."))
+		}
+
+		// Authorize jwt with OPA
+		isAuthorized, err := Authorize(tokenString)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println(isAuthorized)
+
+		var parser jwtgo.Parser
+		tokenParsed, _, err := parser.ParseUnverified(tokenString, &GroupClaims{})
+
+		groups := []string{}
+		if claims, ok := tokenParsed.Claims.(*GroupClaims); ok {
+			groups = claims.Groups
+		} else {
+			panic(fmt.Errorf("Cannot get token information"))
+		}
+
+		response := TokenReview{
+			ApiVersion: "authentication.k8s.io/v1beta1",
+			Kind:       "TokenReview",
+			Status: TokenReviewStatus{
+				Authenticated: isAuthorized,
+				User: TokenReviewUser{
+					Username: "admin",
+					Groups:   groups,
+				},
+			},
+		}
+		responseString, err := json.Marshal(response)
+
+		io.WriteString(w, string(responseString))
+	})
+
+	// One can use generate_cert.go in crypto/tls to generate cert.pem and key.pem.
+	log.Printf("About to listen on 8443. Go to https://127.0.0.1:8443/")
+	err := http.ListenAndServeTLS(":8443", "cert.pem", "key.pem", nil)
+	//err := http.ListenAndServe(":8443", nil)
+	log.Fatal(err)
 	// Return answer to k8s api server
 }

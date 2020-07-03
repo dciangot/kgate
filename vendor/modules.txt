@@ -103,6 +103,9 @@ github.com/open-policy-agent/opa/topdown/internal/jwx/jws/verify
 github.com/open-policy-agent/opa/types
 github.com/open-policy-agent/opa/util
 github.com/open-policy-agent/opa/version
+# github.com/patrickmn/go-cache v2.1.0+incompatible
+## explicit
+github.com/patrickmn/go-cache
 # github.com/pkg/errors v0.8.1
 github.com/pkg/errors
 # github.com/rcrowley/go-metrics v0.0.0-20190704165056-9c2d0518ed81
