@@ -6,6 +6,6 @@ Kubernetes webhook for OPA+JWT AuthN/Z
 ## Quick-start
 
 ```bash
-go run utils/gen-certs.go --host localhost
+go run utils/gen-cert.go --host localhost
 go run main.go
 ```
